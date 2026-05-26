@@ -19,6 +19,7 @@ _GRAMMAR_MODULES: dict[str, str] = {
     "python": "tree_sitter_python",
     "javascript": "tree_sitter_javascript",
     "typescript": "tree_sitter_typescript",
+    "dart": "tree_sitter_dart",
     "go": "tree_sitter_go",
     "java": "tree_sitter_java",
     "rust": "tree_sitter_rust",
@@ -97,16 +98,24 @@ class ASTParser:
                 import importlib
 
                 mod = importlib.import_module(mod_name)
+                if language == "typescript" and hasattr(mod, "language_typescript"):
+                    return TSLanguage(mod.language_typescript())
                 lang_fn = getattr(mod, "language", None)
                 if lang_fn is not None:
-                    # tree-sitter-typescript exposes typescript/tsx as sub-attrs
-                    if language == "typescript" and hasattr(mod, "language_typescript"):
-                        return TSLanguage(mod.language_typescript())
                     return TSLanguage(lang_fn())
             except Exception:
                 pass
 
-        # Strategy 2: tree-sitter-languages bundle (legacy, broad coverage)
+        # Strategy 2: tree-sitter-language-pack (precompiled grammars,
+        # including languages without standalone PyPI grammar wheels such as Dart).
+        try:
+            from tree_sitter_language_pack import get_language
+
+            return get_language(language)
+        except Exception:
+            pass
+
+        # Strategy 3: tree-sitter-languages bundle (legacy, broad coverage)
         try:
             import tree_sitter_languages  # type: ignore[import-untyped]
 

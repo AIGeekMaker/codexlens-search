@@ -97,6 +97,13 @@ _SYMBOL_NODE_TYPES: dict[str, dict[str, SymbolKind]] = {
         "namespace_definition": SymbolKind.MODULE,
         "type_definition": SymbolKind.TYPE_ALIAS,
     },
+    "dart": {
+        "class_definition": SymbolKind.CLASS,
+        "mixin_declaration": SymbolKind.TRAIT,
+        "extension_declaration": SymbolKind.MODULE,
+        "enum_declaration": SymbolKind.ENUM,
+        "type_alias": SymbolKind.TYPE_ALIAS,
+    },
 }
 
 
@@ -136,6 +143,104 @@ def _extract_signature(node, source_lines: list[str]) -> str | None:
     return None
 
 
+def _dart_parent_type_name(node) -> str | None:
+    """Return the enclosing Dart class/mixin/extension name, if any."""
+    current = node.parent
+    while current is not None:
+        if current.type in ("class_definition", "mixin_declaration", "extension_declaration"):
+            return _find_name_node(current)
+        current = current.parent
+    return None
+
+
+def _dart_signature_container(node):
+    """Return the Dart signature wrapper used to find an optional body."""
+    current = node
+    while current.parent is not None and current.parent.type in (
+        "method_signature",
+        "declaration",
+    ):
+        current = current.parent
+    return current
+
+
+def _dart_symbol_end_line(node) -> int:
+    """Extend Dart method/function symbols through their following body."""
+    container = _dart_signature_container(node)
+    body = getattr(container, "next_named_sibling", None)
+    if body is not None and body.type == "function_body":
+        return body.end_point[0] + 1
+    return container.end_point[0] + 1
+
+
+def _dart_signature_name(node) -> str | None:
+    """Extract a Dart method/function/constructor signature name."""
+    if node.type in ("constructor_signature", "factory_constructor_signature"):
+        identifiers = [
+            child.text.decode("utf-8", errors="replace")
+            for child in node.children
+            if child.type == "identifier"
+        ]
+        if len(identifiers) >= 2:
+            return f"{identifiers[0]}.{identifiers[1]}"
+        if identifiers:
+            return f"{identifiers[0]}.new"
+        return None
+    return _find_name_node(node)
+
+
+def _extract_dart_symbols(tree) -> list[Symbol]:
+    """Extract Dart symbols using tree-sitter-dart node shapes."""
+    source_text = tree.root_node.text.decode("utf-8", errors="replace")
+    source_lines = source_text.splitlines()
+    symbols: list[Symbol] = []
+    seen: set[tuple[str, str, int]] = set()
+
+    def _append(name: str, kind: SymbolKind, node, parent_name: str | None = None) -> None:
+        key = (name, kind.value, node.start_point[0])
+        if key in seen:
+            return
+        seen.add(key)
+        signature = _extract_signature(node, source_lines)
+        symbols.append(
+            Symbol(
+                name=name,
+                kind=kind,
+                start_line=node.start_point[0] + 1,
+                end_line=_dart_symbol_end_line(node),
+                parent_name=parent_name,
+                signature=signature,
+                language="dart",
+            )
+        )
+
+    def _walk(node) -> None:
+        kind = _SYMBOL_NODE_TYPES["dart"].get(node.type)
+        if kind is not None:
+            name = _find_name_node(node)
+            if name:
+                _append(name, kind, node)
+
+        if node.type in (
+            "function_signature",
+            "getter_signature",
+            "setter_signature",
+            "constructor_signature",
+            "factory_constructor_signature",
+        ):
+            name = _dart_signature_name(node)
+            if name:
+                parent_name = _dart_parent_type_name(node)
+                kind = SymbolKind.METHOD if parent_name else SymbolKind.FUNCTION
+                _append(name, kind, node, parent_name=parent_name)
+
+        for child in node.children:
+            _walk(child)
+
+    _walk(tree.root_node)
+    return symbols
+
+
 def extract_symbols(tree, language: str) -> list[Symbol]:
     """Extract symbols from a tree-sitter parse tree.
 
@@ -150,6 +255,8 @@ def extract_symbols(tree, language: str) -> list[Symbol]:
     type_map = _SYMBOL_NODE_TYPES.get(language)
     if type_map is None:
         return []
+    if language == "dart":
+        return _extract_dart_symbols(tree)
 
     source_text = tree.root_node.text.decode("utf-8", errors="replace")
     source_lines = source_text.splitlines()

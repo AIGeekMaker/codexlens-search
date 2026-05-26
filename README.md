@@ -221,7 +221,7 @@ Enabled by default. Disable with `CODEXLENS_AST_CHUNKING=false`.
 - **Graph search** — seeded from vector/FTS results, BFS expansion with adaptive weights
 - **Query expansion** — two-hop symbol vocabulary expansion for natural language queries
 
-Languages: Python, JavaScript, TypeScript, Go, Java, Rust, C, C++, Ruby, PHP, Scala, Kotlin, Swift, C#, Bash, Lua, Haskell, Elixir, Erlang.
+Languages: Python, JavaScript, TypeScript, Dart, Go, Java, Rust, C, C++, Ruby, PHP, Scala, Kotlin, Swift, C#, Bash, Lua, Haskell, Elixir, Erlang.
 
 ## Configuration Examples
 

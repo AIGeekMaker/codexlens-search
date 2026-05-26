@@ -43,7 +43,7 @@ class Config:
     code_extensions: frozenset[str] = frozenset({
         ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".cpp", ".c",
         ".h", ".hpp", ".cs", ".rs", ".rb", ".php", ".scala", ".kt", ".swift",
-        ".lua", ".sh", ".bash", ".zsh", ".ps1", ".vue", ".svelte",
+        ".dart", ".lua", ".sh", ".bash", ".zsh", ".ps1", ".vue", ".svelte",
     })
 
     # AST-based chunking (uses tree-sitter)

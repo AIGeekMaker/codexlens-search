@@ -8,13 +8,11 @@ Targets: parsers/chunker.py (9%), parsers/parser.py (28%),
 """
 from __future__ import annotations
 
+from importlib.util import find_spec
+
 import pytest
 
-try:
-    from tree_sitter import Language as TSLanguage, Parser as TSParser
-    _HAS_TREE_SITTER = True
-except ImportError:
-    _HAS_TREE_SITTER = False
+_HAS_TREE_SITTER = find_spec("tree_sitter") is not None
 
 pytestmark = pytest.mark.skipif(
     not _HAS_TREE_SITTER, reason="tree-sitter not installed"
@@ -85,6 +83,36 @@ class CachedLoader extends DataLoader {
         this.cacheDir = cacheDir;
     }
 }
+'''
+
+DART_SOURCE = '''\
+import 'package:flutter/material.dart';
+import '../logic/login_page_logic.dart';
+
+abstract class BaseLogic {
+  void run();
+}
+
+class LoginPageLogic extends BaseLogic implements Validator {
+  LoginPageLogic({required this.api});
+
+  final LoginApi api;
+
+  @override
+  void run() {
+    helper();
+  }
+
+  bool validate(String value) {
+    return value.isNotEmpty && api.check(value);
+  }
+}
+
+enum LoginState { idle, loading }
+
+typedef LoginCallback = void Function(LoginState state);
+
+void helper() {}
 '''
 
 
@@ -243,7 +271,6 @@ class TestExtractReferencesPython:
         symbols = extract_symbols(tree, "python")
         refs = extract_references(tree, "python", symbols)
         call_refs = [r for r in refs if r.ref_kind == "call"]
-        call_names = {r.to_name for r in call_refs}
         # Should detect calls like list(), glob(), read_text(), upper(), etc.
         assert len(call_refs) > 0
 
@@ -332,6 +359,74 @@ class TestExtractReferencesJS:
         refs = extract_references(tree, "javascript", symbols)
         call_refs = [r for r in refs if r.ref_kind == "call"]
         assert len(call_refs) > 0
+
+
+class TestExtractDart:
+    """Test symbol and reference extraction from Dart source."""
+
+    def _parse_dart(self, source: str):
+        from codexlens_search.parsers.parser import ASTParser
+        parser = ASTParser.get_instance()
+        return parser.parse(source.encode("utf-8"), "dart")
+
+    def test_parse_dart_returns_tree(self):
+        tree = self._parse_dart("class Foo {}\n")
+        if tree is None:
+            pytest.skip("Dart grammar not available")
+        assert tree.root_node.type == "program"
+
+    def test_extracts_dart_symbols(self):
+        from codexlens_search.parsers.symbols import extract_symbols
+
+        tree = self._parse_dart(DART_SOURCE)
+        if tree is None:
+            pytest.skip("Dart grammar not available")
+
+        symbols = extract_symbols(tree, "dart")
+        by_name = {s.name: s for s in symbols}
+        assert by_name["LoginPageLogic"].kind.value == "class"
+        assert by_name["validate"].kind.value == "method"
+        assert by_name["validate"].parent_name == "LoginPageLogic"
+        assert by_name["LoginState"].kind.value == "enum"
+        assert by_name["LoginCallback"].kind.value == "type_alias"
+        assert by_name["helper"].kind.value == "function"
+
+    def test_extracts_dart_references(self):
+        from codexlens_search.parsers.symbols import extract_symbols
+        from codexlens_search.parsers.references import extract_references
+
+        tree = self._parse_dart(DART_SOURCE)
+        if tree is None:
+            pytest.skip("Dart grammar not available")
+
+        symbols = extract_symbols(tree, "dart")
+        refs = extract_references(tree, "dart", symbols)
+
+        import_names = {r.to_name for r in refs if r.ref_kind == "import"}
+        inherit_names = {r.to_name for r in refs if r.ref_kind == "inherit"}
+        call_names = {r.to_name for r in refs if r.ref_kind == "call"}
+        type_names = {r.to_name for r in refs if r.ref_kind == "type_ref"}
+
+        assert "material" in import_names
+        assert "login_page_logic" in import_names
+        assert "BaseLogic" in inherit_names
+        assert "Validator" in inherit_names
+        assert "helper" in call_names
+        assert "check" in call_names
+        assert "LoginApi" in type_names
+        assert "LoginState" in type_names
+
+    def test_chunk_by_ast_dart(self):
+        from codexlens_search.parsers.chunker import chunk_by_ast
+
+        chunks = chunk_by_ast(DART_SOURCE, "login_page_logic.dart", "dart", max_chars=500)
+        if not chunks:
+            pytest.skip("Dart grammar not available")
+
+        assert len(chunks) > 0
+        combined = "".join(chunk[0] for chunk in chunks)
+        assert "class LoginPageLogic" in combined
+        assert "void helper()" in combined
 
 
 class TestChunkByAST:

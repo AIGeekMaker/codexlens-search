@@ -221,7 +221,7 @@ LLM 增强的代码定位 — 找到与 Bug 修复或特性实现相关的文件
 - **图搜索** — 以向量/FTS 结果为种子，BFS 扩展，自适应边权重
 - **查询扩展** — 两跳符号词汇表扩展，提升自然语言查询召回率
 
-支持语言：Python、JavaScript、TypeScript、Go、Java、Rust、C、C++、Ruby、PHP、Scala、Kotlin、Swift、C#、Bash、Lua、Haskell、Elixir、Erlang。
+支持语言：Python、JavaScript、TypeScript、Dart、Go、Java、Rust、C、C++、Ruby、PHP、Scala、Kotlin、Swift、C#、Bash、Lua、Haskell、Elixir、Erlang。
 
 ## 配置示例
 

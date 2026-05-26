@@ -27,6 +27,9 @@ _PRIMITIVE_TYPES: frozenset[str] = frozenset({
     "uint", "uint8", "uint16", "uint32", "uint64",
     "float32", "float64", "complex64", "complex128",
     "uintptr", "rune", "error",
+    # Dart
+    "String", "int", "double", "num", "bool", "void", "dynamic", "Never",
+    "Null", "Object",
 })
 
 
@@ -504,6 +507,113 @@ def _extract_java_refs(root_node, symbols: list[Symbol]) -> list[SymbolRef]:
     return refs
 
 
+def _iter_descendants(node):
+    """Yield all descendants of a tree-sitter node."""
+    for child in node.children:
+        yield child
+        yield from _iter_descendants(child)
+
+
+def _dart_type_name(node) -> str | None:
+    """Extract a Dart type or identifier name."""
+    if node.type in ("identifier", "type_identifier"):
+        return _get_node_text(node)
+    for child in node.children:
+        name = _dart_type_name(child)
+        if name:
+            return name
+    return None
+
+
+def _dart_definition_name_node(node):
+    """Return a definition-name node to avoid treating it as a type reference."""
+    if node.type in ("class_definition", "mixin_declaration", "extension_declaration", "enum_declaration"):
+        return node.child_by_field_name("name")
+    if node.type == "type_alias":
+        for child in node.children:
+            if child.type == "type_identifier":
+                return child
+    return None
+
+
+def _dart_import_name(raw_uri: str) -> str:
+    """Convert a Dart import URI into a stable graph node name."""
+    uri = raw_uri.strip("'\"")
+    tail = uri.replace("\\", "/").rsplit("/", 1)[-1]
+    if tail.endswith(".dart"):
+        tail = tail[:-5]
+    return tail or uri
+
+
+def _dart_selector_call_name(node) -> str | None:
+    """Extract the called name from a Dart argument selector."""
+    has_args = any(child.type == "argument_part" for child in node.children)
+    if not has_args:
+        return None
+    previous = getattr(node, "prev_named_sibling", None)
+    if previous is None:
+        return None
+    if previous.type == "selector":
+        for child in previous.children:
+            if child.type == "unconditional_assignable_selector":
+                name = _dart_type_name(child)
+                if name:
+                    return name
+        return _dart_type_name(previous)
+    return _dart_type_name(previous)
+
+
+def _extract_dart_refs(root_node, symbols: list[Symbol]) -> list[SymbolRef]:
+    """Extract references from a Dart AST."""
+    refs: list[SymbolRef] = []
+
+    def _walk(node) -> None:
+        ntype = node.type
+        line = node.start_point[0] + 1
+
+        if ntype == "library_import":
+            from_sym = _find_enclosing_symbol(node, symbols)
+            for child in _iter_descendants(node):
+                if child.type == "string_literal":
+                    name = _dart_import_name(_get_node_text(child))
+                    if name:
+                        refs.append(SymbolRef(from_sym, name, "import", line))
+                    break
+            return
+
+        if ntype == "class_definition":
+            class_name = _get_node_text(node.child_by_field_name("name")) if node.child_by_field_name("name") else ""
+            for child in node.children:
+                if child.type in ("superclass", "interfaces", "mixins"):
+                    for descendant in _iter_descendants(child):
+                        if descendant.type == "type_identifier":
+                            name = _get_node_text(descendant)
+                            if name not in _PRIMITIVE_TYPES:
+                                refs.append(
+                                    SymbolRef(class_name, name, "inherit", descendant.start_point[0] + 1)
+                                )
+
+        if ntype == "selector":
+            from_sym = _find_enclosing_symbol(node, symbols)
+            name = _dart_selector_call_name(node)
+            if name and name not in _PRIMITIVE_TYPES:
+                refs.append(SymbolRef(from_sym, name, "call", line))
+
+        if ntype == "type_identifier":
+            name = _get_node_text(node)
+            if name not in _PRIMITIVE_TYPES:
+                definition_name = _dart_definition_name_node(node.parent) if node.parent else None
+                if definition_name is None or definition_name != node:
+                    from_sym = _find_enclosing_symbol(node, symbols)
+                    refs.append(SymbolRef(from_sym, name, "type_ref", line))
+
+        for child in node.children:
+            _walk(child)
+
+    _walk(root_node)
+    return refs
+
+
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
@@ -513,6 +623,7 @@ _LANGUAGE_EXTRACTORS = {
     "typescript": _extract_js_ts_refs,
     "go": _extract_go_refs,
     "java": _extract_java_refs,
+    "dart": _extract_dart_refs,
 }
 
 

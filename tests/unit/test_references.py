@@ -380,10 +380,84 @@ class TestExtractJavaRefs:
         assert any(r.to_name == "Parent" for r in inherit_refs)
 
 
+@pytestmark_ts
+class TestExtractDartRefs:
+    def _extract(self, code: str):
+        parser = ASTParser.get_instance()
+        if not parser.supports("dart"):
+            pytest.skip("dart grammar not available")
+        tree = parser.parse(code.encode(), "dart")
+        symbols = extract_symbols(tree, "dart")
+        return symbols, extract_references(tree, "dart", symbols)
+
+    def test_extracts_dart_symbols(self):
+        code = (
+            "class LoginPageLogic extends BaseLogic {\n"
+            "  LoginPageLogic();\n"
+            "  bool validate(String value) => value.isNotEmpty;\n"
+            "}\n"
+            "enum LoginState { idle, loading }\n"
+            "typedef LoginCallback = void Function(LoginState state);\n"
+        )
+        symbols, _ = self._extract(code)
+        names = {s.name for s in symbols}
+        assert "LoginPageLogic" in names
+        assert "validate" in names
+        assert "LoginState" in names
+        assert "LoginCallback" in names
+
+    def test_import_statement(self):
+        _, refs = self._extract(
+            "import 'package:flutter/material.dart';\n"
+            "import '../logic/login_page_logic.dart';\n"
+        )
+        import_refs = [r for r in refs if r.ref_kind == "import"]
+        names = {r.to_name for r in import_refs}
+        assert "material" in names
+        assert "login_page_logic" in names
+
+    def test_class_extends_and_implements(self):
+        code = "class Child extends Parent implements Runnable {}\n"
+        _, refs = self._extract(code)
+        inherit_refs = [r for r in refs if r.ref_kind == "inherit"]
+        names = {r.to_name for r in inherit_refs}
+        assert "Parent" in names
+        assert "Runnable" in names
+
+    def test_call_expression(self):
+        code = (
+            "class LoginPageLogic {\n"
+            "  bool validate(String value) {\n"
+            "    helper();\n"
+            "    return api.check(value);\n"
+            "  }\n"
+            "}\n"
+        )
+        _, refs = self._extract(code)
+        call_refs = [r for r in refs if r.ref_kind == "call"]
+        names = {r.to_name for r in call_refs}
+        assert "helper" in names
+        assert "check" in names
+        assert any(r.from_symbol_name == "validate" for r in call_refs)
+
+    def test_type_refs_include_custom_types(self):
+        code = (
+            "class LoginPageLogic {\n"
+            "  final LoginApi api;\n"
+            "  LoginState state(LoginCallback callback) => LoginState.idle;\n"
+            "}\n"
+        )
+        _, refs = self._extract(code)
+        type_refs = [r for r in refs if r.ref_kind == "type_ref"]
+        names = {r.to_name for r in type_refs}
+        assert "LoginApi" in names
+        assert "LoginState" in names
+        assert "LoginCallback" in names
+
+
 class TestUnsupportedLanguage:
     def test_returns_empty_for_unsupported(self):
         from codexlens_search.parsers.references import extract_references
-        from codexlens_search.parsers.symbols import Symbol
 
         # Create a mock tree with root_node
         class MockNode:

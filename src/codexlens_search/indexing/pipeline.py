@@ -100,6 +100,7 @@ _EXT_TO_LANGUAGE: dict[str, str] = {
     ".go": "go",
     ".java": "java",
     ".rs": "rust",
+    ".dart": "dart",
     ".cpp": "cpp",
     ".c": "c",
     ".h": "c",
@@ -160,8 +161,6 @@ def is_file_excluded(
     if gitignore_matcher is not None and gitignore_matcher.is_excluded(file_path):
         return "excluded by .gitignore"
 
-    # Extension check
-    suffix = file_path.suffix.lower()
     # Handle compound extensions like .min.js
     name_lower = file_path.name.lower()
     for ext in config.exclude_extensions:
@@ -578,6 +577,7 @@ class IndexingPipeline:
         r"(?:export\s+)?(?:async\s+)?(?:def|class|function)\s+"       # Python/JS/TS
         r"|(?:pub\s+)?(?:fn|struct|impl|enum|trait|mod)\s+"           # Rust
         r"|(?:func|type)\s+"                                          # Go
+        r"|(?:abstract\s+)?(?:class|mixin|extension|enum|typedef)\s+"  # Dart
         r"|(?:public|private|protected|internal)?\s*(?:static\s+)?(?:class|interface|enum|record)\s+"  # Java/C#
         r"|(?:namespace|template)\s+"                                 # C++
         r")",

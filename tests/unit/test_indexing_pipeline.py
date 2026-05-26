@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -26,6 +26,7 @@ class TestDetectLanguage:
         (".go", "go"),
         (".java", "java"),
         (".rs", "rust"),
+        (".dart", "dart"),
         (".cpp", "cpp"),
         (".c", "c"),
         (".h", "c"),
