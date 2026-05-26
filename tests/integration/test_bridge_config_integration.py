@@ -124,6 +124,13 @@ class TestCreateConfigFromEnv:
 
         assert config.default_search_quality == "fast"
 
+    def test_binary_backend_from_env(self, tmp_path):
+        env = {"CODEXLENS_BINARY_BACKEND": "hnswlib"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = create_config_from_env(tmp_path)
+
+        assert config.binary_backend == "hnswlib"
+
     def test_reranker_api_from_env(self, tmp_path):
         env = {
             "CODEXLENS_RERANKER_API_URL": "https://rerank.example.com/v1",

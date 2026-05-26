@@ -105,6 +105,11 @@ class TestCreateConfigEnvVarsExtended:
             config = create_config_from_env(tmp_path)
             assert config.default_search_quality == "fast"
 
+    def test_binary_backend_env(self, tmp_path):
+        with patch.dict(os.environ, {"CODEXLENS_BINARY_BACKEND": "hnswlib"}):
+            config = create_config_from_env(tmp_path)
+            assert config.binary_backend == "hnswlib"
+
     def test_shard_config_env(self, tmp_path):
         env = {
             "CODEXLENS_NUM_SHARDS": "4",
