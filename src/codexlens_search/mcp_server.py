@@ -42,6 +42,7 @@ import re
 import shutil
 import subprocess
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -62,6 +63,15 @@ _lock = threading.Lock()
 _bg_indexing: dict[str, threading.Thread] = {}
 _watchers: dict[str, "FileWatcher"] = {}
 _watcher_lock = threading.Lock()
+
+
+@dataclass
+class _LocateCandidate:
+    path: str
+    score: float
+    line: int = 0
+    end_line: int = 0
+    source: str = ""
 
 
 def _env_int(name: str, default: int) -> int:
@@ -407,13 +417,26 @@ def _grep_relevant_files(
     pattern = "|".join(re.escape(t) for t in terms[:8])  # cap at 8 terms
     search_path = str(root / scope) if scope else str(root)
 
+    code_type = (
+        "code:*.{py,js,ts,jsx,tsx,go,java,rs,cpp,c,h,hpp,rb,php,cs,kt,"
+        "swift,scala,lua,sh,vue,svelte,dart}"
+    )
     try:
         result = subprocess.run(
-            [rg, "--count", "--ignore-case",
-             "--type-add", "code:*.{py,js,ts,jsx,tsx,go,java,rs,cpp,c,h,hpp,rb,php,cs,kt,swift,scala,lua,sh,vue,svelte}",
-             "--type", "code",
-             pattern, search_path],
-            capture_output=True, text=True, timeout=10,
+            [
+                rg,
+                "--count",
+                "--ignore-case",
+                "--type-add",
+                code_type,
+                "--type",
+                "code",
+                pattern,
+                search_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (subprocess.TimeoutExpired, OSError):
         return []
@@ -572,6 +595,222 @@ def _semantic_search(
         (r.path, r.line, r.end_line, r.score, r.content, getattr(r, "language", ""))
         for r in results
     ]
+
+
+def _identifier_query_terms(query: str) -> list[str]:
+    """Extract code-like identifiers from a locate query."""
+    stop_words = {
+        "and", "are", "for", "from", "has", "have", "how", "implemented",
+        "implementation", "referenced", "references", "show", "that", "the",
+        "this", "what", "where", "which", "with",
+    }
+    terms: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", query):
+        if len(token) < 3:
+            continue
+        lower = token.lower()
+        if lower in stop_words:
+            continue
+        if lower in seen:
+            continue
+        seen.add(lower)
+        terms.append(token)
+    return terms
+
+
+def _snake_case_identifier(name: str) -> str:
+    """Convert a code identifier to snake_case for file/import matching."""
+    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    s2 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1)
+    return s2.replace("__", "_").lower()
+
+
+def _locate_regex_terms(query: str) -> list[str]:
+    """Choose regex terms for locate without over-expanding code identifiers."""
+    code_terms = [
+        term for term in _identifier_query_terms(query)
+        if "_" in term or any(ch.isupper() for ch in term[1:])
+    ]
+    if not code_terms:
+        return _expand_query_terms(query)
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in code_terms:
+        for variant in (term, _snake_case_identifier(term)):
+            key = variant.lower()
+            if key not in seen:
+                seen.add(key)
+                terms.append(variant)
+    return terms
+
+
+def _scope_matches(path: str, scope: str) -> bool:
+    if not scope:
+        return True
+    norm_scope = scope.replace("\\", "/").strip("/")
+    norm_path = path.replace("\\", "/")
+    return norm_path == norm_scope or norm_path.startswith(norm_scope + "/")
+
+
+def _locate_structural_candidates(
+    project_path: str,
+    query: str,
+    top_k: int,
+    scope: str = "",
+) -> list[_LocateCandidate]:
+    """Collect file candidates from symbols, references, and regex matches."""
+    candidates: list[_LocateCandidate] = []
+    fts = _get_fts(project_path)
+    if fts is not None:
+        try:
+            for term in _identifier_query_terms(query):
+                symbols = fts.get_symbols_by_name(term)
+                if not symbols:
+                    try:
+                        rows = fts._conn.execute(
+                            "SELECT id, chunk_id, name, kind, start_line, end_line, "
+                            "parent_name, signature, language FROM symbols "
+                            "WHERE name LIKE ? LIMIT ?",
+                            (f"%{term}%", max(top_k * 2, 20)),
+                        ).fetchall()
+                    except Exception:
+                        rows = []
+                    symbols = [
+                        {
+                            "chunk_id": r[1],
+                            "start_line": r[4],
+                            "end_line": r[5],
+                        }
+                        for r in rows
+                    ]
+                for sym in symbols:
+                    chunk_id = sym.get("chunk_id")
+                    if chunk_id is None:
+                        continue
+                    meta = fts.get_doc_meta(int(chunk_id))
+                    path = Path(meta[0]).as_posix() if meta and meta[0] else ""
+                    if path and _scope_matches(path, scope):
+                        candidates.append(
+                            _LocateCandidate(
+                                path=path,
+                                score=1.0,
+                                line=int(sym.get("start_line") or meta[1] or 0),
+                                end_line=int(sym.get("end_line") or meta[2] or 0),
+                                source="symbol",
+                            )
+                        )
+
+                for ref in fts.get_refs_to(term):
+                    path = Path(ref["from_path"]).as_posix()
+                    if _scope_matches(path, scope):
+                        candidates.append(
+                            _LocateCandidate(
+                                path=path,
+                                score=0.85,
+                                line=int(ref.get("line") or 0),
+                                source="refs",
+                            )
+                        )
+                for ref in fts.get_refs_from(term):
+                    path = Path(ref["from_path"]).as_posix()
+                    if _scope_matches(path, scope):
+                        candidates.append(
+                            _LocateCandidate(
+                                path=path,
+                                score=0.65,
+                                line=int(ref.get("line") or 0),
+                                source="refs",
+                            )
+                        )
+        finally:
+            fts.close()
+
+    root = Path(project_path).resolve()
+    regex_files = _grep_relevant_files(
+        root,
+        _locate_regex_terms(query),
+        scope,
+        max_files=max(top_k * 3, 30),
+    )
+    for path in regex_files:
+        try:
+            rel = path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+        if _scope_matches(rel, scope):
+            candidates.append(_LocateCandidate(path=rel, score=0.45, source="regex"))
+
+    return candidates
+
+
+def _merge_locate_candidates(
+    pipeline_results: list,
+    structural_results: list[_LocateCandidate],
+    top_k: int,
+) -> list[_LocateCandidate]:
+    """Merge file candidates with reciprocal-rank style scoring by path."""
+    scores: dict[str, float] = {}
+    best: dict[str, _LocateCandidate] = {}
+
+    def add(path: str, score: float, rank: int, candidate: _LocateCandidate) -> None:
+        if not path:
+            return
+        rank_score = 1.0 / (60 + rank)
+        scores[path] = scores.get(path, 0.0) + rank_score + max(score, 0.0) * 0.01
+        current = best.get(path)
+        if current is None or candidate.score > current.score:
+            best[path] = candidate
+
+    for rank, result in enumerate(pipeline_results, 1):
+        candidate = _LocateCandidate(
+            path=result.path,
+            score=float(result.score),
+            line=int(result.line or 0),
+            end_line=int(result.end_line or 0),
+            source="pipeline",
+        )
+        add(candidate.path, candidate.score, rank, candidate)
+
+    for rank, candidate in enumerate(structural_results, 1):
+        source_boost = {
+            "symbol": 3.0,
+            "refs": 2.0,
+            "regex": 1.0,
+        }.get(candidate.source, 1.0)
+        add(candidate.path, source_boost, rank, candidate)
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    return [best[path] for path, _ in ranked[:top_k]]
+
+
+def _locate_hybrid_files(
+    project_path: str,
+    query: str,
+    top_k: int,
+    llm_expand: bool,
+    scope: str = "",
+) -> tuple[list[_LocateCandidate], str]:
+    """Locate files using semantic search plus symbol/ref/regex fallback."""
+    _, search, _ = _get_pipelines(project_path)
+    pipeline_k = max(top_k * 5, 50)
+    pipeline_results = search.search_files(
+        query,
+        top_k=pipeline_k,
+        llm_expand=llm_expand,
+    )
+    if scope:
+        pipeline_results = [
+            r for r in pipeline_results
+            if _scope_matches(r.path, scope)
+        ]
+
+    structural_results = _locate_structural_candidates(
+        project_path, query, top_k=top_k, scope=scope
+    )
+    mode = "hybrid LLM-enhanced" if llm_expand else "hybrid pipeline"
+    return _merge_locate_candidates(pipeline_results, structural_results, top_k), mode
 
 
 def _parse_regex_output(raw: str) -> list[tuple[str, int, str]]:
@@ -784,10 +1023,13 @@ async def locate(
             "Index the project first, then search."
         )
 
-    _, search, config = _get_pipelines(project_path)
-
     try:
-        results = search.search_files(query, top_k=top_k, llm_expand=llm_expand)
+        results, mode = _locate_hybrid_files(
+            project_path,
+            query,
+            top_k=top_k,
+            llm_expand=llm_expand,
+        )
     except Exception as exc:
         log.error("Search failed: %s", exc, exc_info=True)
         return f"Error: search failed: {exc}"
@@ -801,7 +1043,6 @@ async def locate(
         loc = f" L{r.line}-{r.end_line}" if r.line and r.end_line else ""
         lines.append(f"{i}. **{r.path}**{loc}{score_str}")
 
-    mode = "LLM-enhanced" if llm_expand else "pipeline"
     header = f"Found {len(results)} file(s) ({mode} search) for: *{query[:100]}*\n"
     return header + "\n".join(lines)
 

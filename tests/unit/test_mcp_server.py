@@ -471,3 +471,170 @@ class TestSemanticSearch:
             results = _semantic_search(str(tmp_path), "test", 10, "src/auth")
             assert len(results) == 1
             assert results[0][0] == "src/auth/login.py"
+
+
+# ---------------------------------------------------------------------------
+# locate hybrid helpers
+# ---------------------------------------------------------------------------
+
+class TestLocateHybrid:
+    def test_identifier_query_terms_extracts_code_names(self):
+        from codexlens_search.mcp_server import _identifier_query_terms
+
+        terms = _identifier_query_terms(
+            "Where is LoginPageLogic implemented and referenced?"
+        )
+
+        assert "LoginPageLogic" in terms
+        assert "Where" not in terms
+
+    def test_locate_regex_terms_prefers_code_identifier_variants(self):
+        from codexlens_search.mcp_server import _locate_regex_terms
+
+        terms = _locate_regex_terms(
+            "Where is LoginPageLogic implemented and referenced?"
+        )
+
+        assert terms == ["LoginPageLogic", "login_page_logic"]
+
+    def test_locate_hybrid_uses_symbol_and_refs_when_pipeline_empty(self, tmp_path):
+        from codexlens_search.mcp_server import _locate_hybrid_files
+
+        mock_search = MagicMock()
+        mock_search.search_files.return_value = []
+
+        mock_fts = MagicMock()
+        mock_fts.get_symbols_by_name.return_value = [
+            {"chunk_id": 10, "start_line": 39, "end_line": 428}
+        ]
+        mock_fts.get_doc_meta.return_value = (
+            "packages/app_login/lib/src/features/login_page/logic/login_page_logic.dart",
+            39,
+            428,
+            "dart",
+        )
+        mock_fts.get_refs_to.return_value = [
+            {
+                "from_path": "packages/app_login/lib/src/features/login_page/page/login_page.dart",
+                "line": 55,
+            }
+        ]
+        mock_fts.get_refs_from.return_value = []
+
+        with patch(
+            "codexlens_search.mcp_server._get_pipelines",
+            return_value=(None, mock_search, None),
+        ):
+            with patch(
+                "codexlens_search.mcp_server._get_fts",
+                return_value=mock_fts,
+            ):
+                with patch(
+                    "codexlens_search.mcp_server._grep_relevant_files",
+                    return_value=[],
+                ):
+                    results, mode = _locate_hybrid_files(
+                        str(tmp_path),
+                        "Where is LoginPageLogic implemented and referenced?",
+                        top_k=5,
+                        llm_expand=False,
+                    )
+
+        paths = [r.path for r in results]
+        assert mode == "hybrid pipeline"
+        assert (
+            "packages/app_login/lib/src/features/login_page/logic/"
+            "login_page_logic.dart"
+        ) in paths
+        assert (
+            "packages/app_login/lib/src/features/login_page/page/login_page.dart"
+        ) in paths
+        mock_search.search_files.assert_called_once_with(
+            "Where is LoginPageLogic implemented and referenced?",
+            top_k=50,
+            llm_expand=False,
+        )
+
+    def test_locate_hybrid_applies_scope_to_structural_results(self, tmp_path):
+        from codexlens_search.mcp_server import _locate_hybrid_files
+
+        mock_search = MagicMock()
+        mock_search.search_files.return_value = []
+
+        mock_fts = MagicMock()
+        mock_fts.get_symbols_by_name.return_value = [
+            {"chunk_id": 10, "start_line": 1, "end_line": 2}
+        ]
+        mock_fts.get_doc_meta.return_value = (
+            "packages/app_login/lib/src/features/login_page/logic/login_page_logic.dart",
+            1,
+            2,
+            "dart",
+        )
+        mock_fts.get_refs_to.return_value = [
+            {"from_path": "packages/app_home/lib/home.dart", "line": 1}
+        ]
+        mock_fts.get_refs_from.return_value = []
+
+        with patch(
+            "codexlens_search.mcp_server._get_pipelines",
+            return_value=(None, mock_search, None),
+        ):
+            with patch(
+                "codexlens_search.mcp_server._get_fts",
+                return_value=mock_fts,
+            ):
+                with patch(
+                    "codexlens_search.mcp_server._grep_relevant_files",
+                    return_value=[],
+                ):
+                    results, _ = _locate_hybrid_files(
+                        str(tmp_path),
+                        "LoginPageLogic",
+                        top_k=5,
+                        llm_expand=False,
+                        scope="packages/app_login/lib",
+                    )
+
+        paths = [r.path for r in results]
+        assert (
+            "packages/app_login/lib/src/features/login_page/logic/"
+            "login_page_logic.dart"
+        ) in paths
+        assert "packages/app_home/lib/home.dart" not in paths
+
+    def test_locate_tool_uses_hybrid_results(self, tmp_path):
+        from codexlens_search.mcp_server import _LocateCandidate, locate
+
+        db_path = tmp_path / ".codexlens"
+        db_path.mkdir()
+        (db_path / "metadata.db").touch()
+
+        candidates = [
+            _LocateCandidate(
+                path=(
+                    "packages/app_login/lib/src/features/login_page/logic/"
+                    "login_page_logic.dart"
+                ),
+                score=1.0,
+                line=39,
+                end_line=428,
+                source="symbol",
+            )
+        ]
+
+        with patch(
+            "codexlens_search.mcp_server._locate_hybrid_files",
+            return_value=(candidates, "hybrid pipeline"),
+        ):
+            result = asyncio.run(
+                locate(
+                    str(tmp_path),
+                    "Where is LoginPageLogic implemented?",
+                    top_k=5,
+                    llm_expand=False,
+                )
+            )
+
+        assert "hybrid pipeline search" in result
+        assert "login_page_logic.dart" in result
